@@ -958,11 +958,11 @@ void mixTable() {
     } else {
         // to use it with A0_A1_PIN_HEX
       #if defined(A0_A1_PIN_HEX) && (NUMBER_MOTOR == 6) && defined(PROMINI)
-        servo[2] = constrain(TILT_PITCH_MIDDLE  + rcData[AUX3]-1500 , TILT_PITCH_MIN, TILT_PITCH_MAX);
-        servo[3] = constrain(TILT_ROLL_MIDDLE   + rcData[AUX4]-1500,  TILT_ROLL_MIN, TILT_ROLL_MAX);     
+        servo[2] = constrain(TILT_PITCH_MIDDLE  + rcData[TILT_PITCH_AUX_CH]-1500 , TILT_PITCH_MIN, TILT_PITCH_MAX);
+        servo[3] = constrain(TILT_ROLL_MIDDLE   + rcData[TILT_ROLL_AUX_CH]-1500,  TILT_ROLL_MIN, TILT_ROLL_MAX);     
       #else
-        servo[0] = constrain(TILT_PITCH_MIDDLE  + rcData[AUX3]-1500 , TILT_PITCH_MIN, TILT_PITCH_MAX);
-        servo[1] = constrain(TILT_ROLL_MIDDLE   + rcData[AUX4]-1500,  TILT_ROLL_MIN, TILT_ROLL_MAX);
+        servo[0] = constrain(TILT_PITCH_MIDDLE  + rcData[TILT_PITCH_AUX_CH]-1500 , TILT_PITCH_MIN, TILT_PITCH_MAX);
+        servo[1] = constrain(TILT_ROLL_MIDDLE   + rcData[TILT_ROLL_AUX_CH]-1500,  TILT_ROLL_MIN, TILT_ROLL_MAX);
       #endif
     }
   #endif  
@@ -1020,7 +1020,7 @@ void mixTable() {
     #if  defined(FLAPPERONS) && defined(FLAPPERON_EP)
       int8_t flapinv[2] = FLAPPERON_INVERT; 
       static int16_t F_Endpoint[2] = FLAPPERON_EP;
-      int16_t flap =MIDRC-constrain(rcData[FLAPPERONS],F_Endpoint[1],F_Endpoint[0]);
+      int16_t flap =MIDRC-constrain(rcData[FLAPPERONS],F_Endpoint[0],F_Endpoint[1]);
       static int16_t slowFlaps= flap;
       #if defined(FLAPSPEED)
         if (slowFlaps < flap ){slowFlaps+=FLAPSPEED;}else if(slowFlaps > flap){slowFlaps-=FLAPSPEED;}
