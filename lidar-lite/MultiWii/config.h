@@ -183,12 +183,12 @@
 
       /* I2C barometer */
       //#define BMP085
-      #define MS561101BA
+      //#define MS561101BA
 
       /* I2C magnetometer */
       //#define HMC5843
       //#define HMC5883
-      #define AK8975
+      //#define AK8975
       //#define MAG3110
 
       /* Sonar */ // for visualization purpose currently - no control code behind

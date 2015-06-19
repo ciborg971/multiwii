@@ -1349,6 +1349,17 @@ void Gyro_getADC() {
 #endif
 
 
+#if SONAR || LIDAR
+// These routines are common to both Lidar and Sonar sensors
+
+// read a 16bit unsigned int from the i2c bus
+uint16_t i2c_readReg16(uint8_t addr, uint8_t reg) {
+  uint8_t b[2];
+  i2c_read_reg_to_buf(addr, reg, (uint8_t*)&b, sizeof(b));
+  return (b[0]<<8) | b[1];
+}
+#endif
+
 // ************************************************************************************************************
 // I2C Sonar SRF08
 // ************************************************************************************************************
@@ -1423,13 +1434,6 @@ uint16_t i2c_try_readReg(uint8_t add, uint8_t reg) {
   uint8_t r = TWDR;
   i2c_stop();
   return r;  
-}
-
-// read a 16bit unsigned int from the i2c bus
-uint16_t i2c_readReg16(int8_t addr, int8_t reg) {
-  uint8_t b[2];
-  i2c_read_reg_to_buf(addr, reg, (uint8_t*)&b, sizeof(b));
-  return (b[0]<<8) | b[1];
 }
 
 void i2c_srf08_change_addr(int8_t current, int8_t moveto) {
@@ -1532,12 +1536,14 @@ void Sonar_update() {}
   #define LIDAR_DEFAULT_ADDRESS 0x62      // 7bit default slave address  (0xC4/C5)
 #endif
 
+#define LIDAR_RANGE_STARTUP_WAIT      150000
+
 #if !defined(LIDAR_RANGE_WAIT) 
   #define LIDAR_RANGE_WAIT      70000      // delay between Ping and Range Read commands (65ms is safe in any case)
 #endif
 
 #if !defined(LIDAR_RANGE_SLEEP) 
-  #define LIDAR_RANGE_SLEEP     2000       // sleep this long before starting another Ping
+  #define LIDAR_SLEEP_NEXT     70000       // sleep this long before starting another Ping
 #endif
 
 // UPDATE -- can't see that the LIDAR sensor can change it's address, though it does say "default address"
@@ -1553,116 +1559,155 @@ void Sonar_update() {}
 //#define SONAR_MULTICAST_PING
 
 // registers of the device
-#define LIDAR_REG_COMMAND    0x0
-#define LIDAR_REG_MODE       0x4
+#define LIDAR_REG_COMMAND    0x00
+#define LIDAR_REG_MODE       0x04
 #define LIDAR_REG_DISTANCE   0x8f
-#define LIDAR_REG_VELOCITY   0x9
+#define LIDAR_REG_VELOCITY   0x09
 
 
 static struct {
   // sensor registers from the MS561101BA datasheet
-  int  range[LIDAR_MAX_SENSORS];
-  int  velocity[LIDAR_MAX_SENSORS];
+  uint16_t  range[LIDAR_MAX_SENSORS];
+  //uint16_t  velocity[LIDAR_MAX_SENSORS];
   int8_t   sensors;              // the number of sensors present
-  int8_t   current;              // the current sensor being read
+  //uint8_t   current;              // the current sensor being read
   uint8_t  state;
   uint32_t deadline;
+  uint16_t readings;
 } lidar_ctx;
+
+
+// unfortunately, the LIDAR sensor requires its own i2c functions because it relies on NACK and ACK
+// for polling
+uint8_t __attribute__ ((noinline)) lidar_waitTransmissionI2C(uint8_t twcr) {
+  TWCR = twcr;
+  uint8_t count = 255;
+  while (!(TWCR & (1<<TWINT))) {
+    count--;
+    if (count==0) {              //we are in a blocking state => we don't insist
+      TWCR = 0;                  //and we force a reset on TWINT register
+      return 1;
+    }
+  }
+  return 0;
+}
+
+uint8_t lidar_rep_start(uint8_t address) {
+  if(lidar_waitTransmissionI2C((1<<TWINT) | (1<<TWSTA) | (1<<TWEN))) // send REPEAT START condition and wait until transmission completed
+    return 1;
+  TWDR = address;                                           // send device address
+  if(lidar_waitTransmissionI2C((1<<TWINT) | (1<<TWEN)))              // wail until transmission completed
+    return 1;
+  return 0;
+}
+
+void lidar_stop(void) {
+  TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWSTO);
+}
+
+uint8_t lidar_write(uint8_t data ) {
+  TWDR = data;                                 // send data to the previously addressed device
+  return lidar_waitTransmissionI2C((1<<TWINT) | (1<<TWEN));   
+}
+
+uint8_t lidar_readAck(uint8_t& b) {
+  if(lidar_waitTransmissionI2C((1<<TWINT) | (1<<TWEN) | (1<<TWEA)))
+    return 1;
+  b=TWDR;
+  return 0;
+}
+
+uint8_t lidar_readNak(uint8_t& b) {
+  if(lidar_waitTransmissionI2C((1<<TWINT) | (1<<TWEN)))
+    return 1;
+  b = TWDR;
+  lidar_stop();
+  return 0;
+}
+
+uint8_t lidar_read_reg_to_buf(uint8_t add, uint8_t reg, uint8_t *buf, uint8_t size) {
+  if(lidar_rep_start(add<<1) || // I2C write direction
+     lidar_write(reg) ||        // register selection
+     lidar_rep_start((add<<1) | 1))  // I2C read direction
+     return 1;
+  uint8_t *b = buf;
+  while (--size)  if(lidar_readAck(*b++)) return 1; // acknowledge all but the final byte
+  return lidar_readNak(*b);
+}
+
+inline uint8_t lidar_readReg(uint8_t add, uint8_t reg, uint8_t& val) {
+  return lidar_read_reg_to_buf(add, reg, &val, 1);
+}
+
+inline uint16_t lidar_readReg16(uint8_t addr, uint8_t reg, uint16_t& val) {
+  return lidar_read_reg_to_buf(addr, reg, (uint8_t*)&val, sizeof(val));
+  //return (b[0]<<8) | b[1];
+}
+
+uint8_t lidar_writeReg(uint8_t add, uint8_t reg, uint8_t val) {
+  if(lidar_rep_start(add<<1) // I2C write direction
+     || lidar_write(reg)        // register selection
+     || lidar_write(val))        // value to write in register
+     return 1;
+   lidar_stop(); 
+   return 0;
+}
 
 
 // read uncompensated temperature value: send command first
 void Lidar_init() {
   memset(&lidar_ctx, 0, sizeof(lidar_ctx));
-  lidar_ctx.deadline = 4000000;
-  lidar_ctx.current = LIDAR_DEFAULT_ADDRESS;
+  //lidar_ctx.deadline = 0;
+  //lidar_ctx.current = LIDAR_DEFAULT_ADDRESS;
 }
 
-
-// read a 16bit unsigned int from the i2c bus
-uint16_t i2c_readReg16(int8_t addr, int8_t reg) {
-  uint8_t b[2];
-  i2c_read_reg_to_buf(addr, reg, (uint8_t*)&b, sizeof(b));
-  return (b[0]<<8) | b[1];
-}
-
-
-// if supported, begin sensor discovery
-#if defined(LIDAR_SENSOR_FIRST)
-// this function works like readReg accept a failed read is a normal expectation
-// use for testing the existence of sensors on the i2c bus
-// a 0xffff code is returned if the read failed
-uint16_t i2c_try_readReg(uint8_t add, uint8_t reg) {
-  uint16_t count = 255;
-  i2c_rep_start(add<<1);  // I2C write direction
-  i2c_write(reg);        // register selection
-  i2c_rep_start((add<<1)|1);  // I2C read direction
-  TWCR = (1<<TWINT) | (1<<TWEN);
-  while (!(TWCR & (1<<TWINT))) {
-    count--;
-    if (count==0) {              //we are in a blocking state => we don't insist
-      TWCR = 0;                  //and we force a reset on TWINT register
-      return 0xffff;  // return failure to read
-    }
-  }
-  uint8_t r = TWDR;
-  i2c_stop();
-  return r;  
-}
-
-void i2c_lidar_change_addr(int8_t current, int8_t moveto) {
-
-}
-
-// discover previously known sensors and any new sensor (move new sensors to assigned area)
-void i2c_lidar_discover() {
-
-}
-#endif  // end of sensor discovery
 
 void Lidar_update() {
   if ((int32_t)(currentTime - lidar_ctx.deadline)<0) return;
+  uint8_t v;
+  uint16_t vv;
   lidar_ctx.deadline = currentTime;
+  //TWBR = ((F_CPU / 100000) - 16) / 2;          // set the I2C clock rate to 100kHz
   switch (lidar_ctx.state) {
     case 0: 
-    #if defined(LIDAR_SENSOR_FIRST)
-      lidar_discover();  // discovert a sensor
-      if(lidar_ctx.sensors>0) lidar_ctx.state++; 
-      else                    lidar_ctx.deadline += 100000; // wait 100ms before configuring sensor
-    #else
-      // no discovery supported, assume single sensor
-      lidar_ctx.state=10;
-      lidar_ctx.current = LIDAR_DEFAULT_ADDRESS;
-    #endif
+      // no discovery supported yet, assume single sensor for now
+      lidar_ctx.state++;
+      lidar_ctx.deadline += LIDAR_RANGE_STARTUP_WAIT;
       break;
     case 1:
+      // configure the sensor
+      lidar_ctx.deadline += LIDAR_SLEEP_NEXT;
+      //i2c_writeReg(LIDAR_DEFAULT_ADDRESS, 0x68, 0xC8);
+      if(lidar_writeReg(LIDAR_DEFAULT_ADDRESS, LIDAR_REG_COMMAND, 0x00))
+        break; // try again next time
       lidar_ctx.state++;
-      lidar_ctx.deadline += LIDAR_RANGE_SLEEP;
       break;
+      // roll into the next case
     case 2:
       // send a ping to the current sensor
-      i2c_writeReg(lidar_ctx.current, LIDAR_REG_COMMAND, 0x04);  // start ranging, result in centimeters
-      lidar_ctx.state++;
       lidar_ctx.deadline += LIDAR_RANGE_WAIT;
+      if(!lidar_writeReg(LIDAR_DEFAULT_ADDRESS, LIDAR_REG_COMMAND, 0x04)) {  // start ranging, result in centimeters
+        lidar_ctx.state++;
+        debug[0]++;
+      }
       break;
-    case 3: 
+    case 3:
       // read the distance
-      lidar_ctx.range[0] = i2c_readReg16(lidar_ctx.current, LIDAR_REG_DISTANCE);
-    #if defined(LIDAR_SENSOR_FIRST)
-      lidar_ctx.current++;
-      if(lidar_ctx.current >= lidar_ctx.sensors) lidar_ctx.state=1;
-      else                                       lidar_ctx.state=2; 
-    #else
-      lidar_ctx.state=1;
-    #endif
-      break;
-    case 10:
-      // configure the sensor
-      i2c_writeReg(lidar_ctx.current, LIDAR_REG_COMMAND, 0x00);
-      lidar_ctx.state=1;
-      lidar_ctx.deadline += LIDAR_RANGE_SLEEP;
+      if(lidar_readReg16(LIDAR_DEFAULT_ADDRESS, LIDAR_REG_DISTANCE, lidar_ctx.range[0])) {
+        // error occured, try again in a few millis
+        lidar_ctx.deadline += LIDAR_RANGE_WAIT;
+        debug[1]++;
+      } else {
+        // successful read
+        sonarAlt = lidar_ctx.range[0];
+        debug[3] = lidar_ctx.readings++;
+        lidar_ctx.deadline += LIDAR_SLEEP_NEXT;
+        lidar_ctx.state=2;
+      }
       break;
   } 
-  sonarAlt = lidar_ctx.range[0]; // only one sensor considered for the moment
+  //TWBR = ((F_CPU / 400000) - 16) / 2;          // set the I2C clock rate to 400kHz
+  lidar_stop(); 
 }
 #else
 inline void Lidar_init() {}
